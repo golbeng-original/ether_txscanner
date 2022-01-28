@@ -1,201 +1,25 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
-	"sync"
+	"os"
+	"runtime"
 	"time"
+
+	"github.com/briandowns/spinner"
+	"github.com/urfave/cli/v2"
 
 	"github.com/umbracle/go-web3"
 	"github.com/umbracle/go-web3/jsonrpc"
+	"github.com/vtok/ether_txscanner/scan"
+	"github.com/vtok/ether_txscanner/scan/logger"
 
 	_ "github.com/go-sql-driver/mysql"
 )
-
-func erc721Scane() {
-
-	client, err := jsonrpc.NewClient("https://mainnet.infura.io/v3/9aa3d95b3bc440fa88ea12eaa4456161")
-	if err != nil {
-		fmt.Println(err)
-		return
-	}
-
-	defer client.Close()
-
-	//targetAddress := "0xF6Aafb3689D54DCA004BD7dF3926e88346B687D3"
-	targetAddress := "0x66A760a769E5d7Fa47dFC4e01dD21dB432640Efe"
-
-	transactionScanner := TransactionScanner{
-		AccountAddress: targetAddress,
-		ApiKey:         "Z66CR65XMITC22DSQAXF4V44P4CABU9DXI",
-	}
-
-	transactions, err := transactionScanner.RequestTxs(client)
-	if err != nil {
-		fmt.Println(err)
-		return
-	}
-
-	erc721Scanner := Erc721TransactionScanner{
-		Transactions: transactions,
-	}
-
-	result := erc721Scanner.ScanErc721TransferEvent(client)
-
-	// 원래 25
-	// 현재 17
-	fmt.Println(len(result))
-}
-
-func blockScan(client *jsonrpc.Client, fromBlock uint64, toBlock uint64, scanUnit uint64) ([]DbBlock, error) {
-
-	dbBlockList := make([]DbBlock, 0)
-
-	var startBlockNumber uint64 = fromBlock
-	for startBlockNumber <= toBlock {
-
-		endBlockNumber := startBlockNumber + scanUnit
-		if endBlockNumber > toBlock {
-			endBlockNumber = toBlock
-		}
-
-		result, err := blockScanRange(client, 0, scanUnit)
-		if err != nil {
-			return nil, err
-		}
-
-		dbBlockList = append(dbBlockList, result...)
-
-		startBlockNumber = endBlockNumber + 1
-	}
-
-	return dbBlockList, nil
-
-}
-
-func blockScanRange(client *jsonrpc.Client, fromBlock uint64, toBlock uint64) ([]DbBlock, error) {
-
-	dbBlockList := make([]DbBlock, 0)
-
-	done := make(chan bool)
-	ch := make(chan *DbBlock)
-
-	// block append
-	go func() {
-
-		for dbBlock := range ch {
-			dbBlockList = append(dbBlockList, *dbBlock)
-		}
-
-		done <- true
-
-	}()
-
-	// block 가져오기
-	var getBlockFunc = func(blockIndex uint64, ch chan *DbBlock, wg *sync.WaitGroup) {
-
-		defer wg.Done()
-
-		var block *web3.Block
-		var err error
-
-		for {
-			block, err = client.Eth().GetBlockByNumber(web3.BlockNumber(blockIndex), true)
-
-			if err != nil && err.Error() == "no free connections available to host" {
-				time.Sleep(time.Duration(300 * time.Millisecond))
-				continue
-			} else if err != nil && err.Error() == "dialing to the given TCP address timed out" {
-				time.Sleep(time.Duration(300 * time.Millisecond))
-				continue
-			} else if err != nil {
-				fmt.Println("client error : ", err)
-				return
-			}
-			break
-		}
-
-		if block == nil {
-			return
-		}
-
-		timeStamp := time.Unix(int64(block.Timestamp), 0).UTC()
-
-		dbBlock := DbBlock{
-			BlockNumber:    block.Number,
-			BlockHash:      block.Hash,
-			BlockTimeStamp: timeStamp,
-		}
-
-		ch <- &dbBlock
-	}
-
-	//
-	wg := sync.WaitGroup{}
-	for i := fromBlock; i <= toBlock; i++ {
-		wg.Add(1)
-		go getBlockFunc(i, ch, &wg)
-	}
-
-	wg.Wait()
-
-	close(ch)
-	<-done
-
-	return dbBlockList, nil
-
-	/*
-		latest_block, err := client.Eth().BlockNumber()
-		if err != nil {
-			fmt.Println(err)
-			return
-		}
-
-		fmt.Printf("latest Block = %v\n", latest_block)
-	*/
-
-	/*
-		startTime := time.Now()
-
-		block, err := client.Eth().GetBlockByNumber(web3.BlockNumber(latest_block), true)
-		//fmt.Println(block)
-
-		fmt.Printf("block num = %v\n", block.Number)
-		fmt.Printf("block hash = %v\n", block.Hash)
-		fmt.Printf("tx length = %v \n", len(block.Transactions))
-
-		tx := block.Transactions[0]
-
-		fmt.Printf("tx hash = %v\n", tx.Hash)
-		fmt.Printf("tx from = %v\n", tx.From)
-		fmt.Printf("tx to = %v\n", tx.To)
-		fmt.Printf("tx value = %v\n", tx.Value)
-
-		receipt, err := client.Eth().GetTransactionReceipt(tx.Hash)
-		fmt.Printf("receipt logs = %v\n", len(receipt.Logs))
-
-		fmt.Println(time.Now().Sub(startTime))
-
-		topics := make([]*web3.Hash, 0)
-		topic := web3.HexToHash("0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef")
-		topics = append(topics, &topic)
-
-		filter := &web3.LogFilter{
-			Address: []web3.Address{web3.HexToAddress("0x66A760a769E5d7Fa47dFC4e01dD21dB432640Efe")},
-			//Topics:  topics,
-		}
-
-		logs, err := client.Eth().GetLogs(filter)
-		if err != nil {
-			fmt.Println(err)
-			return
-		}
-
-		fmt.Println(logs)
-	*/
-
-}
 
 func logQuery() {
 
@@ -225,77 +49,325 @@ func logQuery() {
 	fmt.Println(string(bodyContent))
 }
 
-func main() {
+func queryLatestBlockFunc(web3Provider string) error {
+
+	s := spinner.New(spinner.CharSets[35], 100*time.Millisecond)
+	s.Start()
+	defer s.Stop()
+
+	client, err := jsonrpc.NewClient(web3Provider)
+	if err != nil {
+		return err
+	}
+
+	defer client.Close()
+
+	latestblockNum, err := client.Eth().BlockNumber()
+	if err != nil {
+		return err
+	}
+
+	fmt.Println("\rlatestBlockNumber : ", latestblockNum)
+
+	return nil
+}
+
+func scanFunc(fromBlock uint64, toBlock uint64, configure scan.BlockScanConfigure) error {
+
+	if configure.Err() != nil {
+		return configure.Err()
+	}
+
+	logger.EnableCatchedLog = false
+
+	blockScanWorker := 1
+	if configure.BlockScanWorker > 0 {
+		blockScanWorker = configure.BlockScanWorker
+	}
+
+	dbWriteWorker := 1
+	if configure.DBWriteWorker > 0 {
+		dbWriteWorker = configure.DBWriteWorker
+	}
+
+	dbConfirmWorker := 1
+	if configure.DBConfirmWorker > 0 {
+		dbConfirmWorker = configure.DBConfirmWorker
+	}
+
+	web3Recorder := scan.Web3Recorder{
+		BlockScanWorker:    blockScanWorker, //1024,
+		DbWriteWorker:      dbWriteWorker,   //256, //740,
+		DbConfirmWorker:    dbConfirmWorker, //64,  // 120
+		BlockWeb3Providers: configure.Web3Providers,
+		DBConnectionString: configure.DbConnString,
+	}
+
+	fmt.Println("Start Scaning")
+
+	startTime := time.Now()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	err := web3Recorder.BlockScan(ctx, fromBlock, toBlock)
+	if err != nil {
+		return err
+	}
+
+	fmt.Printf("Complete Scaning [%v]\n", time.Since(startTime))
+	return nil
+}
+
+func makeLatestBlockCommand() *cli.Command {
+	return &cli.Command{
+		Name:    "get-latestblock",
+		Aliases: []string{"gl"},
+		Usage:   "specific net block scan and record",
+		Flags: []cli.Flag{
+			&cli.StringFlag{
+				Name:     "web3",
+				Usage:    "web3 provider http/https url",
+				Aliases:  []string{"w"},
+				Required: true,
+			},
+		},
+		Action: func(c *cli.Context) error {
+			web3Provider := c.String("web3")
+
+			return queryLatestBlockFunc(web3Provider)
+		},
+	}
+}
+
+func makeScanCommand() *cli.Command {
 
 	/*
-		db, err := sql.Open("mysql", "root:1111@tcp(127.0.0.1:3306)/ether_tx")
+		db : "root:1111@tcp(127.0.0.1:3306)/ether_tx",
+		web3provider : "https://mainnet.infura.io/v3/9aa3d95b3bc440fa88ea12eaa4456161",
+		toblock : 0,
+		fromBlock :1000000,
+	*/
+
+	return &cli.Command{
+		Name:    "blockscan",
+		Aliases: []string{"bs"},
+		Usage:   "specific net block scan and record",
+		Flags: []cli.Flag{
+			&cli.Uint64Flag{
+				Name:     "fromblock",
+				Usage:    "scan fromBlock",
+				Aliases:  []string{"f"},
+				Required: true,
+			},
+			&cli.Uint64Flag{
+				Name:     "toblock",
+				Usage:    "scan toBlock",
+				Aliases:  []string{"t"},
+				Required: true,
+			},
+			&cli.StringSliceFlag{
+				Name:     "web3",
+				Usage:    "web3 provider http/https url",
+				Aliases:  []string{"w"},
+				Required: true,
+			},
+			&cli.StringFlag{
+				Name:     "db",
+				Usage:    "record target database connection string",
+				Aliases:  []string{"d"},
+				Required: true,
+			},
+			&cli.IntFlag{
+				Name:     "scan-worker-count",
+				Usage:    "block scan worker count",
+				Aliases:  []string{"sw"},
+				Required: false,
+			},
+			&cli.IntFlag{
+				Name:     "write-worker-count",
+				Usage:    "block write worker count",
+				Aliases:  []string{"ww"},
+				Required: false,
+			},
+			&cli.IntFlag{
+				Name:     "confirm-worker-count",
+				Usage:    "block confirm worker count",
+				Aliases:  []string{"cw"},
+				Required: false,
+			},
+		},
+		Action: func(c *cli.Context) error {
+
+			fromBlock := c.Uint64("fromblock")
+			toBlock := c.Uint64("toblock")
+			web3Providers := c.StringSlice("web3")
+			dbConnectString := c.String("db")
+
+			blockScanWorker := c.Int("scan-worker-count")
+			dbWriteWorker := c.Int("write-worker-count")
+			dbConfirmWorker := c.Int("confirm-worker-count")
+
+			configure := scan.BlockScanConfigure{
+				BlockScanWorker: blockScanWorker,
+				DBWriteWorker:   dbWriteWorker,
+				DBConfirmWorker: dbConfirmWorker,
+				Web3Providers:   web3Providers,
+				DbConnString:    dbConnectString,
+			}
+
+			return scanFunc(fromBlock, toBlock, configure)
+		},
+	}
+}
+
+func checkLocalGethNode() {
+
+	client, err := jsonrpc.NewClient("http://172.30.1.202:7550")
+	if err != nil {
+		fmt.Println(err)
+		return
+	}
+
+	pearCount, _ := client.Net().PeerCount()
+	fmt.Println("pear Count = ", pearCount)
+
+	block, err := client.Eth().GetBlockByNumber(5000000, true)
+	if err != nil {
+		fmt.Println(err)
+		return
+	}
+
+	fmt.Println(block)
+}
+
+func check_provider() {
+
+	//0xe3bd135eae0a9b94067214a120ea4e9fc11a7fd1ab2e04ff06d3c15f75b336ac
+
+	//https://api.mycryptoapi.com/eth
+	//https://nodes.mewapi.io/rpc/eth
+
+	client, _ := jsonrpc.NewClient("http://172.30.1.202:7547")
+	pearCount, _ := client.Net().PeerCount()
+	fmt.Printf("listening %v\n", pearCount)
+
+	lastBlock, _ := client.Eth().BlockNumber()
+	fmt.Printf("block num : %v\n", lastBlock)
+
+	//1270000
+	block, err := client.Eth().GetBlockByNumber(0, true)
+	if err != nil {
+		fmt.Println(err)
+		return
+	}
+
+	if block == nil {
+		fmt.Println("block is nil")
+		return
+	}
+
+	fmt.Printf("block hash = %v, tx count = %v \n", block.Hash, len(block.Transactions))
+
+	for _, tx := range block.Transactions {
+		receipt, err := client.Eth().GetTransactionReceipt(tx.Hash)
 		if err != nil {
 			fmt.Println(err)
 			return
 		}
 
-		defer db.Close()
-	*/
-
-	//erc721Scane()
-
-	//var transferEvent = abi.MustNewEvent("Transfer(address indexed from, address indexed to, uint256 indexed tokenId)")
-	//fmt.Println(transferEvent.ID().String())
-
-	//logQuery()
-
-	client, err := jsonrpc.NewClient("https://mainnet.infura.io/v3/9aa3d95b3bc440fa88ea12eaa4456161")
-	if err != nil {
-		return
-	}
-
-	defer client.Close()
-
-	//
-	client.SetMaxConnsLimit(10000)
-
-	latestBlockNumber, err := client.Eth().BlockNumber()
-	if err != nil {
-		return
-	}
-
-	fmt.Printf("block numnber = %v\n", latestBlockNumber)
-
-	latestBlockNumber = 50000
-
-	//dbBlockList := make([]DbBlock, 0)
-
-	startTime := time.Now()
-
-	/*
-		var scanBlockUnit uint64 = 10000
-		var startBlockNumber uint64 = 0
-		for startBlockNumber <= latestBlockNumber {
-
-			endBlockNumber := startBlockNumber + scanBlockUnit
-			if endBlockNumber > latestBlockNumber {
-				endBlockNumber = latestBlockNumber
-			}
-
-			result, err := blockScanRange(client, 0, 10000)
-			if err != nil {
-				fmt.Println(err)
-				return
-			}
-
-			dbBlockList = append(dbBlockList, result...)
-
-			startBlockNumber = endBlockNumber + 1
+		if receipt == nil {
+			fmt.Println("failed receipt is null")
+			continue
 		}
-	*/
 
-	//
-	dbBlockList, err := blockScan(client, 0, latestBlockNumber, 10000)
+		fmt.Println("success = ", receipt.TransactionHash)
+	}
+
+	receipt, err := client.Eth().GetTransactionReceipt(web3.HexToHash("0xe65bad7fe7fe83da6a12cf0d72564f7188d8c1ab866b8802a3b40afcb8344792"))
+	if err != nil {
+		fmt.Println(err)
+		return
+	}
+	fmt.Println("receipt")
+	fmt.Println(receipt)
+
+}
+
+func test_scanFunc() {
+
+	//4001000
+	//4501000
+
+	configure := scan.BlockScanConfigure{
+		BlockScanWorker: 1024,
+		DBWriteWorker:   256,
+		DBConfirmWorker: 64,
+		DbConnString:    "root:1111@tcp(127.0.0.1:3306)/ether_tx",
+		Web3Providers: []string{
+			"http://172.30.1.202:7541",
+			"http://172.30.1.202:7542",
+			"http://172.30.1.202:7543",
+			"http://172.30.1.202:7544",
+			"http://172.30.1.202:7545",
+			"http://172.30.1.202:7546",
+			//"http://172.30.1.202:7547",
+			//"http://172.30.1.202:7548",
+			"http://172.30.1.202:7549",
+			"http://172.30.1.202:7550",
+
+			"https://mainnet.infura.io/v3/9aa3d95b3bc440fa88ea12eaa4456161",
+			//"https://api.mycryptoapi.com/eth",
+			//"https://nodes.mewapi.io/rpc/eth",
+		},
+	}
+
+	err := scanFunc(4501000, 4501010, configure)
 	if err != nil {
 		fmt.Println(err)
 	}
+}
 
-	fmt.Println(len(dbBlockList))
+func main() {
 
-	fmt.Printf("finish %v", time.Now().Sub(startTime))
+	cores := runtime.NumCPU()
+	runtime.GOMAXPROCS(cores)
+
+	//test_scanFunc()
+
+	//check_provider()
+	//return
+
+	////////
+	/*
+		r1, err := regexp.Compile("dial tcp ([0-9.:]+): socket: too many open files")
+		if err != nil {
+			fmt.Println(err)
+			return
+		}
+
+		m1 := r1.MatchString("dial tcp 127.0.0.1:3306: socket: too many open files")
+		fmt.Printf("macthed = %v\n", m1)
+
+		r2, err := regexp.Compile("")
+	*/
+
+	// check
+	// 0xbd7c924ab0b345466222dd6858907b94cb6b1250249454efc80425f66a2edd58
+	// 0xb3a2389a5c60a830ab54117891014828d2e79a4a2b6592f8b56c9182a03825a7
+
+	app := &cli.App{
+		Name:  "ethereum scan and query",
+		Usage: "ethereum scan and query",
+		Flags: []cli.Flag{},
+		Commands: []*cli.Command{
+			makeLatestBlockCommand(),
+			makeScanCommand(),
+		},
+	}
+
+	err := app.Run(os.Args)
+	if err != nil {
+		log.Fatal(err)
+	}
+
 }
